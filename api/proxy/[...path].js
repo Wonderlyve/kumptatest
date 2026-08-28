@@ -31,6 +31,7 @@ module.exports = async (req, res) => {
       rest = pathOnly.slice(firstSlash) // includes leading '/'
     }
     const query = qs ? `?${qs}` : ''
+    const debug = !!(qs && qs.includes('_debug=1'))
     if (!host) {
       res.statusCode = 400
       res.end('Missing host in proxy path')
@@ -53,7 +54,12 @@ module.exports = async (req, res) => {
     const rawBody = await getRawBody(req)
 
     const headers = { ...req.headers }
-    delete headers.host
+    // Ensure upstream receives expected Host header
+    headers.host = host
+    // Log incoming header names for debugging (avoid logging values)
+    try {
+      console.log('[proxy] incoming headers:', Object.keys(headers))
+    } catch (e) {}
 
     const fetchOptions = {
       method: req.method,
@@ -67,6 +73,16 @@ module.exports = async (req, res) => {
     if (typeof fetch !== 'undefined') {
       upstreamResp = await fetch(target, fetchOptions)
       const buf = Buffer.from(await upstreamResp.arrayBuffer())
+      // If debug flag present, return JSON with upstream details
+      if (debug) {
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.setHeader('Content-Type', 'application/json; charset=utf-8')
+        const headersObj = {}
+        upstreamResp.headers.forEach((v, k) => headersObj[k] = v)
+        res.statusCode = 200
+        res.end(JSON.stringify({ target, upstreamStatus: upstreamResp.status, upstreamHeaders: headersObj, upstreamBody: buf.toString('utf8') }))
+        return
+      }
       // Copy status and headers
       res.statusCode = upstreamResp.status
       upstreamResp.headers.forEach((v, k) => {
@@ -98,6 +114,16 @@ module.exports = async (req, res) => {
       up.on('data', (c) => chunks.push(Buffer.from(c)))
       up.on('end', () => {
         const bodyBuf = Buffer.concat(chunks)
+        // If debug flag present, return JSON with upstream details
+        if (debug) {
+          res.setHeader('Access-Control-Allow-Origin', '*')
+          res.setHeader('Content-Type', 'application/json; charset=utf-8')
+          const headersObj = {}
+          Object.entries(up.headers || {}).forEach(([k, v]) => { headersObj[k] = v })
+          res.statusCode = 200
+          res.end(JSON.stringify({ target, upstreamStatus: up.statusCode || 200, upstreamHeaders: headersObj, upstreamBody: bodyBuf.toString('utf8') }))
+          return
+        }
         res.statusCode = up.statusCode || 200
         Object.entries(up.headers || {}).forEach(([k, v]) => {
           if (['transfer-encoding', 'connection'].includes(k.toLowerCase())) return
